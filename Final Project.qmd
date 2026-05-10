@@ -1,0 +1,1980 @@
+---
+title: "Final Project"
+author: "Khandker Qaiduzzaman"
+format: html
+editor: visual
+execute: 
+  warning: false
+---
+
+# Housing Affordability Dynamics in New York State: A Multi-Source Analysis Using HUD, Census ACS, and FRED Economic Indicators
+
+# Project Description
+
+Housing affordability has emerged as one of the defining economic pressures facing New York State residents over the past two decades. Median home prices and rental costs have consistently outpaced income growth, leaving a growing share of households spending disproportionate fractions of their earnings on shelter. This project investigates the scope and drivers of that affordability gap by integrating three complementary data sources: the U.S. Census Bureau's American Community Survey (ACS) 5-Year Estimates for county-level income and housing cost data, the Federal Reserve Economic Data (FRED) API for macroeconomic indicators such as mortgage rates and inflation, and the U.S. Department of Housing and Urban Development (HUD) Fair Market Rent (FMR) schedules as a policy-grounded benchmark for rental affordability.
+
+The analysis follows an OSEMN-style data science workflow — Obtain, Scrub, Explore, Model, Interpret — progressing from API-based data acquisition, through cleaning and feature engineering, into exploratory visualization, predictive modeling, and a novel application of machine unlearning to assess how sensitive model predictions are to a specific economic shock period. Two research questions structure the modeling work: first, what structural and macroeconomic factors best predict a county's housing burden? Second, how much did the high-interest-rate years of 2022–2024 shape what models learned about rental market conditions?
+
+## Data Sources
+
+The study combines multiple heterogeneous datasets to construct a unified housing affordability framework:
+
+-   **U.S. Census ACS 5-Year Estimates** (via Census API) for median income, home values, and rent data at the county level. Available here: <https://api.census.gov/data.html>
+
+-   **Federal Reserve Economic Data (FRED API)** for macroeconomic indicators including mortgage rates, federal funds rate, and inflation (CPI). Available here: <https://fred.stlouisfed.org/docs/api/fred/>
+
+-   **HUD Fair Market Rent (FMR) data** from publicly available GitHub-hosted datasets. Available here: <https://www.huduser.gov/portal/datasets/fmr.html>. All year's data are saved as CSV files and pulled from GitHub: <https://github.com/NafeesKhandker/DATA-607-Final-Project/tree/main/HUD%20dataset>
+
+This multi-source integration enables a comprehensive view of housing affordability across both local and macroeconomic dimensions.
+
+## ACS 5-Year Data Pull
+
+Median household income, home values, and gross rent are pulled for all 62 New York counties from the Census ACS 5-Year Estimates API, covering 2009 to 2024. County names are cleaned and all numeric fields are standardized before the data is stacked into a single panel and saved as a CSV.
+
+```{r}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(tidycensus)
+library(fredr)
+library(lubridate)
+library(zoo)
+library(gt)
+```
+
+```{r}
+############################################################
+# ACS 5-YEAR - MULTI-YEAR PULL (NY COUNTIES)
+############################################################
+
+library(tidyverse)
+library(jsonlite)
+
+years <- 2009:2024
+
+acs_5yr_all <- list()
+
+for (yr in years) {
+  
+  url <- paste0(
+    "https://api.census.gov/data/", yr, "/acs/acs5?",
+    "get=NAME,B19013_001E,B25077_001E,B25064_001E&",
+    "for=county:*&in=state:36"
+  )
+  
+  try({
+    
+    raw <- fromJSON(url)
+    
+    df <- as.data.frame(raw[-1, ], stringsAsFactors = FALSE)
+    colnames(df) <- raw[1, ]
+    
+    df <- df %>%
+      mutate(year = yr) %>%
+      rename(
+        county_name   = NAME,
+        median_income = B19013_001E,
+        median_home   = B25077_001E,
+        median_rent   = B25064_001E,
+        state_fips    = state,
+        county_fips   = county
+      ) %>%
+      
+      # CLEAN COUNTY NAME
+      mutate(
+        county_name = county_name %>%
+          str_remove(", New York") %>%
+          str_trim()
+      ) %>%
+      
+      # NUMERIC CONVERSION
+      mutate(
+        median_income = as.numeric(median_income),
+        median_home   = as.numeric(median_home),
+        median_rent   = as.numeric(median_rent)
+      )
+    
+    acs_5yr_all[[as.character(yr)]] <- df
+    
+  }, silent = TRUE)
+}
+
+############################################################
+# COMBINE ALL YEARS
+############################################################
+
+acs_ny_5yr <- bind_rows(acs_5yr_all)
+
+############################################################
+# EXPORT CSV
+############################################################
+
+write_csv(acs_ny_5yr, "acs_ny_5year_2005_2024.csv")
+
+############################################################
+# CHECK
+############################################################
+
+acs_ny_5yr |> head(5) |> gt()
+```
+
+## ACS Exploratory Data Analysis
+
+Two charts summarize statewide housing trends across the study period. The left panel plots median income, home values, and rent as separate trend lines. The most striking feature is the steep acceleration in home values after 2019, driven by pandemic-era demand and constrained supply, while income growth remained gradual. Rent increased steadily but at a slower pace than home values, suggesting that the ownership market absorbed the larger share of the post-2020 shock.
+
+The right panel converts these trends into a price-to-income (PTI) ratio — home value divided by median income — which is a standard affordability benchmark. A PTI above 3.0× is conventionally considered unaffordable. The statewide mean PTI has remained above 3.0× throughout the entire 2009–2024 period, meaning New York counties have been in persistent affordability stress for over a decade. The interquartile ribbon widens over time, indicating that the gap between lower-burden rural counties and higher-burden urban counties has grown, not narrowed. The sharpest increase occurs after 2020, where the mean PTI climbs toward 4.5× — a level that signals severe structural unaffordability rather than a temporary cyclical dip.
+
+```{r}
+############################################################
+# ACS 5-YEAR EDA — STATEWIDE TRENDS + AFFORDABILITY RATIO
+############################################################
+
+library(tidyverse)
+library(scales)
+library(patchwork)
+
+# ── PREP ─────────────────────────────────────────────────
+acs_clean <- acs_ny_5yr |>
+  filter(median_income > 0, median_home > 0, median_rent > 0)
+
+state_trends <- acs_clean |>
+  group_by(year) |>
+  summarise(
+    `Median Income`       = mean(median_income, na.rm = TRUE),
+    `Median Home Value`   = mean(median_home,   na.rm = TRUE),
+    `Median Monthly Rent` = mean(median_rent,   na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  pivot_longer(-year, names_to = "Metric", values_to = "Value")
+
+# ── PLOT 1: TRENDS ───────────────────────────────────────
+p1 <- ggplot(state_trends, aes(x = year, y = Value, color = Metric)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 2) +
+  facet_wrap(~Metric, scales = "free_y", ncol = 1) +
+  scale_color_manual(values = c(
+    "Median Income"       = "#1B9E77",
+    "Median Home Value"   = "#D95F02",
+    "Median Monthly Rent" = "#7570B3"
+  )) +
+  scale_x_continuous(breaks = seq(2009, 2024, 2)) +
+  scale_y_continuous(labels = label_dollar(scale_cut = cut_short_scale())) +
+  labs(
+    title    = "NY Housing and Income Trends",
+    subtitle = "State averages across all NY counties",
+    x = "Year", y = "USD"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position  = "none",
+    strip.text       = element_text(face = "bold", size = 11),
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(size = 11, color = "gray40"),
+    axis.title       = element_text(face = "bold"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+# ── PLOT 2: PRICE-TO-INCOME RATIO ────────────────────────
+pti_summary <- acs_clean |>
+  mutate(price_to_income = median_home / median_income) |>
+  group_by(year) |>
+  summarise(
+    pti_mean = mean(price_to_income, na.rm = TRUE),
+    pti_lo   = quantile(price_to_income, 0.25, na.rm = TRUE),
+    pti_hi   = quantile(price_to_income, 0.75, na.rm = TRUE),
+    .groups  = "drop"
+  )
+
+p2 <- ggplot(pti_summary, aes(x = year, y = pti_mean)) +
+  geom_ribbon(aes(ymin = pti_lo, ymax = pti_hi), fill = "#D95F02", alpha = 0.15) +
+  geom_line(color = "#D95F02", linewidth = 1.3) +
+  geom_point(color = "#D95F02", size = 2) +
+  geom_hline(yintercept = 3, linetype = "dashed", color = "gray50") +
+  annotate("text", x = 2009, y = 3.15, label = "3× affordability threshold",
+           hjust = 0, size = 3.5, color = "gray40") +
+  scale_x_continuous(breaks = seq(2009, 2024, 2)) +
+  scale_y_continuous(labels = label_number(suffix = "×", accuracy = 0.1)) +
+  labs(
+    title    = "Home Price-to-Income Ratio",
+    subtitle = "Mean across NY counties; shaded band = interquartile range",
+    x = "Year", y = "Home Value ÷ Median Income"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(size = 11, color = "gray40"),
+    axis.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank()
+  )
+
+# ── COMBINE ──────────────────────────────────────────────
+p1 + p2 +
+  plot_layout(widths = c(1, 1)) +
+  plot_annotation(
+    caption = "Note: ACS 5-Year data averages survey responses over 5 years, producing smoother trends that reduce year-to-year volatility but may lag real-time market changes.",
+    theme = theme(
+      plot.caption = element_text(size = 10, color = "gray40", hjust = 0, face = "italic")
+    )
+  )
+```
+
+## FRED Data Pull
+
+Three macroeconomic series are retrieved from the FRED API: the 30-year fixed mortgage rate, the effective Federal Funds Rate, and the CPI. A retry-enabled function handles intermittent server errors, attempting each request up to five times before failing. All three series are aligned to monthly frequency, joined together, and exported for use in the master dataset.
+
+```{r}
+############################################################
+# FRED DATA PULL
+############################################################
+
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(lubridate)
+library(zoo)
+
+############################################################
+# SAFE FUNCTION WITH RETRY LOGIC
+############################################################
+
+get_fred_data <- function(series_id, retries = 5, wait_sec = 10) {
+  
+  api_key <- Sys.getenv("FRED_API_KEY")
+  
+  url <- paste0(
+    "https://api.stlouisfed.org/fred/series/observations?",
+    "series_id=", series_id,
+    "&api_key=", api_key,
+    "&file_type=json"
+  )
+  
+  for(i in 1:retries){
+    
+    cat("Trying", series_id, "- Attempt", i, "\n")
+    
+    result <- try(GET(url), silent = TRUE)
+    
+    if(!inherits(result, "try-error") && status_code(result) == 200){
+      
+      txt <- content(result, "text", encoding = "UTF-8")
+      data_raw <- fromJSON(txt)
+      
+      df <- data_raw$observations %>%
+        select(date, value) %>%
+        mutate(
+          date = as.Date(date),
+          value = as.numeric(value)
+        )
+      
+      return(df)
+    }
+    
+    Sys.sleep(wait_sec)
+  }
+  
+  stop(paste("Failed after retries:", series_id))
+}
+
+############################################################
+# PULL DATA
+############################################################
+
+mortgage30 <- get_fred_data("MORTGAGE30US")
+Sys.sleep(5)
+
+fed_funds <- get_fred_data("FEDFUNDS")
+Sys.sleep(5)
+
+cpi <- get_fred_data("CPIAUCSL")
+
+############################################################
+# MONTHLY CLEAN DATASET
+############################################################
+
+mortgage_m <- mortgage30 %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(mortgage_rate = mean(value, na.rm = TRUE), .groups = "drop")
+
+fed_m <- fed_funds %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(fed_rate = mean(value, na.rm = TRUE), .groups = "drop")
+
+cpi_m <- cpi %>%
+  mutate(month = floor_date(date, "month")) %>%
+  group_by(month) %>%
+  summarise(cpi = mean(value, na.rm = TRUE), .groups = "drop")
+
+fred_full_monthly <- mortgage_m %>%
+  inner_join(fed_m, by = "month") %>%
+  inner_join(cpi_m, by = "month") %>%
+  arrange(month) %>%
+  mutate(
+    mortgage_rate = na.approx(mortgage_rate, na.rm = FALSE),
+    fed_rate      = na.approx(fed_rate, na.rm = FALSE),
+    cpi           = na.approx(cpi, na.rm = FALSE)
+  )
+
+############################################################
+# EXPORT
+############################################################
+
+write_csv(fred_full_monthly, "fred_full_monthly_1971_present.csv")
+
+fred_full_monthly |> head(5) |> gt()
+```
+
+## FRED Exploratory Data Analysis
+
+Two charts provide macroeconomic context for the housing analysis. The top panel plots the 30-year mortgage rate alongside the Federal Funds Rate from 1971 to the present. The two lines track closely, confirming that retail mortgage costs move in step with monetary policy. The most relevant feature for this project is the sharp rate reversal beginning in early 2022 — the Fed Funds Rate climbed from near zero to over 5%, pushing the 30-year mortgage rate above 7% for the first time since 2001. This rate shock directly reduced purchasing power for homebuyers and added upward pressure on rents as demand shifted toward the rental market.
+
+The bottom panel shows annual CPI inflation as a bar chart. Inflation ran near or below the 2% Fed target for most of 2010–2020, then surged to nearly 9% in 2022 — the highest level since 1981. This inflation spike eroded real household income at the same time that mortgage rates were rising, creating a dual affordability squeeze. The 2% target line shows how far the post-pandemic inflation deviated from the prior decade's baseline, and the rapid return toward target by 2023–2024 provides important context for interpreting the rate environment during the machine unlearning experiment in Research Question 2.
+
+```{r}
+############################################################
+# FRED EDA — INTEREST RATES + CPI (YoY INFLATION)
+############################################################
+library(tidyverse)
+library(scales)
+library(patchwork)
+
+# Okabe-Ito palette
+COL_MORTGAGE <- "#0072B2"   # blue
+COL_FED      <- "#D55E00"   # vermillion
+COL_CPI_POS  <- "#D55E00"   # vermillion (inflation up)
+COL_CPI_NEG  <- "#0072B2"   # blue (deflation)
+
+# ── PLOT 1: MORTGAGE RATE vs FED FUNDS RATE ──────────────
+p1 <- fred_full_monthly |>
+  select(month,
+         `30-Yr Mortgage Rate` = mortgage_rate,
+         `Fed Funds Rate`      = fed_rate) |>
+  pivot_longer(-month, names_to = "Series", values_to = "Rate") |>
+  ggplot(aes(x = month, y = Rate, color = Series)) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = c(
+    "30-Yr Mortgage Rate" = COL_MORTGAGE,
+    "Fed Funds Rate"      = COL_FED
+  )) +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  scale_y_continuous(labels = label_percent(scale = 1, accuracy = 1)) +
+  labs(
+    title    = "Interest Rates Over Time",
+    subtitle = "30-year fixed mortgage rate closely tracks Fed policy cycles",
+    x = NULL, y = "Rate (%)", color = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position  = "bottom",
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(size = 11, color = "gray40"),
+    axis.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank()
+  )
+
+# ── PLOT 2: CPI YEAR-OVER-YEAR % CHANGE ──────────────────
+cpi_yoy <- fred_full_monthly |>
+  arrange(month) |>
+  mutate(
+    cpi_yoy = (cpi / lag(cpi, 12) - 1) * 100,
+    positive = cpi_yoy >= 0
+  ) |>
+  filter(!is.na(cpi_yoy))
+
+p2 <- ggplot(cpi_yoy, aes(x = month, y = cpi_yoy)) +
+  geom_hline(yintercept = 0, color = "gray60", linewidth = 0.5) +
+  geom_hline(yintercept = 2, linetype = "dashed", color = "gray50", linewidth = 0.5) +
+  geom_col(aes(fill = positive), width = 20, show.legend = FALSE) +
+  annotate("text", x = min(cpi_yoy$month), y = 2.4,
+           label = "2% Fed target", hjust = 0, size = 3.2, color = "gray40") +
+  scale_fill_manual(values = c("TRUE" = COL_CPI_POS, "FALSE" = COL_CPI_NEG)) +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  scale_y_continuous(labels = label_percent(scale = 1, accuracy = 1)) +
+  labs(
+    title    = "Annual Inflation Rate (CPI Year-over-Year)",
+    subtitle = "Monthly % change vs. same month prior year; 2022 spike reflects post-COVID surge",
+    x = NULL, y = "YoY Change (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14),
+    plot.subtitle    = element_text(size = 11, color = "gray40"),
+    axis.title       = element_text(face = "bold"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_blank()
+  )
+
+# ── COMBINE ───────────────────────────────────────────────
+p1 / p2 +
+  plot_annotation(
+    caption = "Note: Monthly FRED data. Mortgage rate averaged to monthly from weekly Freddie Mac survey. Fed Funds Rate is the effective rate. CPI inflation = YoY % change in CPIAUCSL (seasonally adjusted).",
+    theme = theme(
+      plot.caption = element_text(size = 10, color = "gray40", hjust = 0, face = "italic")
+    )
+  )
+```
+
+## FRED ACS-Aligned Yearly Aggregate
+
+To align with the ACS panel, the monthly FRED data is aggregated into annual averages for 2009–2024. This produces a compact 16-row table with one row per year, capturing the average mortgage rate, Fed Funds Rate, and CPI level — ready to join with the county-level data. The table confirms the historically low-rate environment of 2010–2021 (mortgage rate averaging around 3.5–5%) before the sharp rise to 6.28% in 2022–2024.
+
+```{r}
+############################################################
+# ACS-ALIGNED YEARLY FRED (CLEAN VERSION)
+############################################################
+
+library(dplyr)
+library(lubridate)
+
+start_date <- as.Date("2009-01-01")
+
+fred_acs_ready <- fred_full_monthly %>%
+  
+  filter(month >= start_date) %>%
+  mutate(year = year(month)) %>%
+  
+  group_by(year) %>%
+  summarise(
+    
+    # macroeconomic level indicators (core variables)
+    mortgage_rate = mean(mortgage_rate, na.rm = TRUE),
+    fed_rate      = mean(fed_rate, na.rm = TRUE),
+    cpi           = mean(cpi, na.rm = TRUE),
+    
+    .groups = "drop"
+  ) %>%
+  
+  arrange(year)
+
+# View
+head(fred_acs_ready, 5)
+
+# Save
+write_csv(fred_acs_ready, "fred_acs_ready_2009_present.csv")
+
+fred_acs_ready |> head(5) |> gt()
+```
+
+## HUD Fair Market Rent Data Pull
+
+HUD Fair Market Rent data for all five bedroom sizes — studio through four-bedroom — are downloaded for each New York county from fiscal years 2009 to 2024. Files are read from GitHub and stacked into a single panel using `map_dfr()`. FMRs represent the 40th percentile of gross rents paid by recent movers and serve as the federal benchmark for housing voucher payment standards under the Section 8 program. The preview confirms the expected structure — in 2009, Bronx County FMRs already ranged from \$1,091 (studio) to \$1,817 (4-BR), substantially above most upstate counties.
+
+```{r}
+library(tidyverse)
+
+############################################################
+# PULL HUD FMR DATA FROM GITHUB (2009–2024)
+############################################################
+
+years <- sprintf("%02d", 9:24)   
+
+base_url <- "https://raw.githubusercontent.com/NafeesKhandker/DATA-607-Final-Project/main/HUD%20dataset/"
+
+############################################################
+# FUNCTION TO READ EACH FILE
+############################################################
+
+get_hud_year <- function(yy){
+
+  file_url <- paste0(base_url, "FY", yy, "_FMRs.csv")
+  
+  message("Reading: ", file_url)
+
+  df <- read_csv(file_url, show_col_types = FALSE)
+
+  df %>%
+    mutate(
+      year = as.integer(paste0("20", yy))
+    )
+}
+
+############################################################
+# COMBINE ALL YEARS
+############################################################
+
+hud_all <- map_dfr(years, get_hud_year)
+
+############################################################
+# CLEAN COLUMN NAMES
+############################################################
+
+names(hud_all) <- names(hud_all) %>%
+  str_to_lower() %>%
+  str_replace_all(" ", "_")
+
+############################################################
+# VIEW DATA
+############################################################
+
+hud_all |> head(n = 5) |> gt()
+```
+
+## HUD FMR Exploratory Data Analysis
+
+A dot plot of 2024 HUD FMRs displays the full spread of rental costs across all 62 counties by unit size, sorted from lowest to highest two-bedroom rent. The chart is split into lower-rent and higher-rent panels for readability.
+
+The findings reveal two important patterns. First, geographic variation is enormous: 2-BR FMRs in 2024 range from under \$850 in Allegany, Cattaraugus, and Wyoming counties to over \$2,500 in New York City and Rockland County — nearly a 3× difference from the cheapest to the most expensive market in the same state. Second, the width of each county's connecting line — which spans all five bedroom sizes — is much larger in high-cost markets. For example, the spread between a studio and a 4-BR unit in New York City exceeds \$1,000/month, while the same spread in a rural county is under \$300. This bedroom-size premium effect reflects tighter supply of family-sized units in dense urban areas, where larger apartments command a disproportionate market premium beyond the base rent level.
+
+```{r}
+############################################################
+# HUD FMR — FMR BY COUNTY & BEDROOM SIZE (2024)
+############################################################
+library(tidyverse)
+library(scales)
+library(patchwork)
+
+# ── PREP ─────────────────────────────────────────────────
+hud_avg <- hud_all |>
+  filter(stusps == "NY", year == 2024) |>                   
+  mutate(county_label = str_remove(countyname, " County")) |>
+  group_by(county_label) |>
+  summarise(across(fmr_0:fmr_4, ~ mean(.x, na.rm = TRUE)), .groups = "drop") |>
+  pivot_longer(fmr_0:fmr_4, names_to = "bedroom", values_to = "avg_fmr") |>
+  mutate(bedroom = recode(bedroom,
+    fmr_0 = "Studio", fmr_1 = "1-BR", fmr_2 = "2-BR",
+    fmr_3 = "3-BR",   fmr_4 = "4-BR"
+  ))
+
+county_order <- hud_avg |>
+  filter(bedroom == "2-BR") |>
+  arrange(avg_fmr) |>
+  pull(county_label)
+
+hud_avg <- hud_avg |>
+  mutate(
+    county_label = factor(county_label, levels = county_order),
+    bedroom      = factor(bedroom, levels = c("Studio","1-BR","2-BR","3-BR","4-BR")),
+    panel        = ifelse(
+      as.integer(county_label) > length(county_order) / 2,
+      "Higher-Rent Counties", "Lower-Rent Counties"
+    )
+  )
+
+COLOR_VALS <- c(
+  "Studio" = "#332288", "1-BR" = "#44AA99", "2-BR" = "#117733",
+  "3-BR"   = "#DDCC77", "4-BR" = "#CC6677"
+)
+
+# ── SHARED PLOT FUNCTION ──────────────────────────────────
+dot_panel <- function(data, show_legend = FALSE) {
+  ggplot(data, aes(x = avg_fmr, y = county_label, color = bedroom)) +
+    geom_line(aes(group = county_label), color = "gray80", linewidth = 0.5) +
+    geom_point(size = 2.2, alpha = 0.9) +
+    scale_color_manual(values = COLOR_VALS, name = "Bedroom Size") +
+    scale_x_continuous(
+      labels = label_dollar(),
+      expand = expansion(mult = c(0.02, 0.05))
+    ) +
+    scale_y_discrete(drop = TRUE) +
+    facet_wrap(~ panel, scales = "free_y") +
+    labs(x = "Monthly FMR (USD)", y = NULL) +
+    theme_minimal(base_size = 11) +
+    theme(
+      legend.position    = if (show_legend) "top" else "none",
+      legend.title       = element_text(face = "bold", size = 9),
+      strip.text         = element_text(face = "bold", size = 11),
+      axis.text.y        = element_text(size = 8.5),
+      axis.title.x       = element_text(face = "bold"),
+      axis.ticks.y       = element_blank(),
+      panel.grid.major.y = element_line(color = "gray93"),
+      panel.grid.major.x = element_line(color = "gray90"),
+      panel.grid.minor   = element_blank()
+    )
+}
+
+# ── BUILD TWO PANELS ──────────────────────────────────────
+p_high <- dot_panel(filter(hud_avg, panel == "Higher-Rent Counties"), show_legend = TRUE)
+p_low  <- dot_panel(filter(hud_avg, panel == "Lower-Rent Counties"),  show_legend = FALSE)
+
+# ── COMBINE ───────────────────────────────────────────────
+p_high + p_low +
+  plot_annotation(
+    title    = "HUD Fair Market Rents by NY County & Bedroom Size (2024)",          # changed
+    subtitle = "Counties ordered by 2-BR FMR (ascending); connecting line shows spread across bedroom sizes",
+    caption  = "Note: 2024 HUD Fair Market Rents represent the 40th percentile gross rent for standard units.\nCounties with wider horizontal spans have a larger bedroom-size premium, often reflecting tighter family-sized unit supply.",  # changed
+    theme = theme(
+      plot.title    = element_text(face = "bold", size = 14),
+      plot.subtitle = element_text(size = 10, color = "gray40"),
+      plot.caption  = element_text(size = 9, color = "gray40", hjust = 0, face = "italic")
+    )
+  )
+```
+
+## Master Dataset Build
+
+The three data sources are merged into a single county-year panel by joining ACS, HUD, and FRED data onto a complete 62-county × 16-year grid. Four derived features are calculated: housing burden (annualized rent divided by median income), HUD burden (2-BR FMR divided by median income), real income index (CPI-adjusted income), and macro housing pressure (burden multiplied by mortgage rate). The final dataset has 992 rows and 21 variables, providing a rich foundation for both exploratory analysis and predictive modeling.
+
+```{r}
+############################################################
+# MASTER DATASET
+# YEARS RESTRICTED TO 2009–2024
+############################################################
+
+library(tidyverse)
+library(lubridate)
+library(zoo)
+
+############################################################
+# 1. CLEAN HUD DATA
+############################################################
+
+hud_clean <- hud_all %>%
+  filter(
+    stusps == "NY",
+    year >= 2009,
+    year <= 2024
+  ) %>%
+  mutate(
+    county_name = countyname %>%
+      str_remove(", NY") %>%
+      str_remove(", New York") %>%
+      str_trim()
+  ) %>%
+  select(
+    county_name,
+    year,
+    pop,
+    fmr_0,
+    fmr_1,
+    fmr_2,
+    fmr_3,
+    fmr_4
+  ) %>%
+  distinct()
+
+############################################################
+# 2. CLEAN ACS5 DATA
+############################################################
+
+acs_clean <- acs_ny_5yr %>%
+  filter(
+    year >= 2009,
+    year <= 2024
+  ) %>%
+  distinct()
+
+############################################################
+# 3. CLEAN FRED DATA
+############################################################
+
+fred_clean <- fred_acs_ready %>%
+  filter(
+    year >= 2009,
+    year <= 2024
+  ) %>%
+  distinct()
+
+############################################################
+# 4. BUILD FULL COUNTY-YEAR GRID
+############################################################
+
+all_counties <- sort(unique(hud_clean$county_name))
+all_years    <- 2009:2024
+
+full_grid <- expand_grid(
+  county_name = all_counties,
+  year = all_years
+)
+
+############################################################
+# 5. JOIN ACS5
+############################################################
+
+master1 <- full_grid %>%
+  left_join(acs_clean, by = c("county_name", "year"))
+
+############################################################
+# 6. JOIN HUD
+############################################################
+
+master2 <- master1 %>%
+  left_join(hud_clean, by = c("county_name", "year"))
+
+############################################################
+# 7. JOIN FRED
+############################################################
+
+final_master <- master2 %>%
+  left_join(fred_clean, by = "year")
+
+############################################################
+# 8. INFLATION RATE (FIXED)
+############################################################
+
+inflation_tbl <- fred_clean %>%
+  arrange(year) %>%
+  mutate(
+    inflation_rate = (cpi / lag(cpi) - 1) * 100
+  ) %>%
+  select(year, inflation_rate)
+
+final_master <- final_master %>%
+  select(-any_of("inflation_rate")) %>%
+  left_join(inflation_tbl, by = "year")
+
+############################################################
+# 9. MINIMAL & NON-REDUNDANT DERIVED FEATURES
+############################################################
+
+final_master <- final_master %>%
+  mutate(
+    
+    # 1. Housing burden (market-based)
+    housing_burden = (median_rent * 12) / median_income,
+    
+    # 2. HUD affordability burden (policy benchmark)
+    hud_burden = (fmr_2 * 12) / median_income,
+    
+    # 3. Real income (CPI-adjusted purchasing power)
+    real_income_index = (median_income / cpi) * 100,
+    
+    # 4. Housing stress from macro environment
+    macro_housing_pressure = housing_burden * mortgage_rate
+  )
+
+############################################################
+# 10. FINAL SORT
+############################################################
+
+final_master <- final_master %>%
+  arrange(county_name, year)
+
+############################################################
+# 11. EXPORT
+############################################################
+
+write_csv(
+  final_master,
+  "ny_housing_final_master_dataset_acs5_2009_2024.csv"
+)
+
+final_master |> head(n = 5) |> gt()
+```
+
+## Shiny App
+
+An interactive Shiny application maps any variable in the master dataset across all 62 New York counties for any year from 2009 to 2024. Users select a metric from a dropdown and step through years with an animated slider. Hovering over a county displays a tooltip with income, rent, population, and the selected metric value. The app makes it easy to observe, for example, how the housing burden ratio darkens across downstate counties after 2020, or how FMR increases spread geographically over time — patterns that are difficult to detect from tables alone.
+
+```{r}
+############################################################
+# SHINY APP — NY HOUSING AFFORDABILITY
+############################################################
+library(shiny)
+library(leaflet)
+library(tigris)
+library(sf)
+library(tidyverse)
+
+options(tigris_use_cache = TRUE)
+
+ny_sf <- counties(state = "NY", cb = TRUE, year = 2020, progress_bar = FALSE) |>
+  st_transform(crs = 4326) |>
+  mutate(county_name = paste0(NAME, " County"))
+
+metric_choices <- c(
+  "Median Household Income"      = "median_income",
+  "Median Home Value"            = "median_home",
+  "Median Monthly Rent"          = "median_rent",
+  "FMR — Studio (0 BR)"          = "fmr_0",
+  "FMR — 1 Bedroom"              = "fmr_1",
+  "FMR — 2 Bedroom"              = "fmr_2",
+  "FMR — 3 Bedroom"              = "fmr_3",
+  "FMR — 4 Bedroom"              = "fmr_4",
+  "Housing Burden (Rent/Income)" = "housing_burden",
+  "HUD Burden (FMR-2/Income)"    = "hud_burden",
+  "Real Income Index"            = "real_income_index"
+)
+
+dollar_metrics <- c("median_income","median_home","median_rent",
+                    "fmr_0","fmr_1","fmr_2","fmr_3","fmr_4")
+ratio_metrics  <- c("housing_burden","hud_burden")
+
+fmt_display <- function(m, val) {
+  if (is.na(val) || !is.finite(val)) return("N/A")
+  if (m %in% dollar_metrics)
+    paste0("$", formatC(val, format = "f", digits = 0, big.mark = ","))
+  else if (m %in% ratio_metrics)
+    paste0(round(val * 100, 1), "%")
+  else
+    as.character(round(val, 2))
+}
+
+# UI
+ui <- fluidPage(
+  tags$head(tags$style(HTML("
+    body, .container-fluid { margin: 0; padding: 0; }
+
+    #controls {
+      display: flex;
+      align-items: flex-end;
+      gap: 32px;                          /* more breathing room between items */
+      padding: 14px 24px;                 /* more vertical + horizontal padding */
+      background: #f8f9fa;
+      border-bottom: 2px solid #dee2e6;
+      flex-wrap: wrap;
+    }
+
+    #controls h4 {
+      margin: 0 16px 6px 0;              /* push title away from dropdowns */
+      font-size: 1.05em;
+      font-weight: 700;
+      align-self: center;
+      white-space: nowrap;
+      color: #1e2d40;
+    }
+
+    .ctrl-group {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;                           /* small gap between label and input */
+    }
+
+    .ctrl-group label {
+      font-size: 0.78em;
+      font-weight: 600;
+      color: #555;
+      margin: 0;
+    }
+
+    .form-group { margin-bottom: 0; }
+    .irs--shiny .irs-single { font-size: 11px; }
+  "))),
+
+  div(id = "controls",
+    tags$h4("NY Housing Affordability Explorer"),
+    div(class = "ctrl-group",
+      tags$label("Metric"),
+      selectInput("metric", label = NULL,
+                  choices  = metric_choices,
+                  selected = "housing_burden",
+                  width    = "230px")
+    ),
+    div(class = "ctrl-group",
+      tags$label("Year"),
+      sliderInput("year", label = NULL,
+                  min = 2009, max = 2024, value = 2024,
+                  step = 1, sep = "", width = "320px",
+                  animate = animationOptions(interval = 1000, loop = FALSE))
+    )
+  ),
+
+  leafletOutput("map", width = "100%", height = "calc(100vh - 85px)")
+)
+
+# SERVER
+server <- function(input, output, session) {
+
+  year_data <- reactive({
+    final_master |>
+      filter(year == input$year) |>
+      transmute(
+        county_name,
+        pop           = as.numeric(pop),
+        median_income = as.numeric(median_income),
+        median_rent   = as.numeric(median_rent),
+        value         = as.numeric(.data[[input$metric]])
+      )
+  })
+
+  map_df <- reactive({
+    ny_sf |> left_join(year_data(), by = "county_name")
+  })
+
+  output$map <- renderLeaflet({
+    leaflet() |>
+      addProviderTiles(providers$CartoDB.Positron) |>
+      setView(lng = -75.5, lat = 42.9, zoom = 7)
+  })
+
+  observe({
+    req(input$metric, input$year)
+
+    df     <- map_df()
+    m      <- input$metric
+    mlabel <- names(metric_choices)[metric_choices == m]
+
+    finite_vals <- df$value[is.finite(df$value)]
+    req(length(finite_vals) > 0)
+
+    pal <- colorNumeric("YlOrRd", domain = finite_vals, na.color = "#cccccc")
+
+    if (m %in% ratio_metrics) {
+      leg_vals  <- finite_vals * 100
+      leg_pal   <- colorNumeric("YlOrRd", domain = leg_vals, na.color = "#cccccc")
+      leg_title <- paste0(mlabel, " (%)<br/><small>", input$year, "</small>")
+    } else {
+      leg_vals  <- finite_vals
+      leg_pal   <- pal
+      leg_title <- paste0(mlabel, "<br/><small>", input$year, "</small>")
+    }
+
+    # TOOLTIPS
+    labels <- lapply(seq_len(nrow(df)), function(i) {
+      cname <- df$county_name[i]
+      pop   <- df$pop[i]
+      inc   <- df$median_income[i]
+      rent  <- df$median_rent[i]
+      val   <- df$value[i]
+
+      pop_fmt  <- if (is.na(pop)  || !is.finite(pop))  "N/A" else
+                    formatC(pop, format = "f", digits = 0, big.mark = ",")
+      inc_fmt  <- fmt_display("median_income", inc)
+      rent_fmt <- fmt_display("median_rent",   rent)
+      val_fmt  <- fmt_display(m, val)
+
+      htmltools::HTML(paste0(
+        "<div style='font-family:Arial,sans-serif; font-size:12px;",
+                     "min-width:180px; line-height:1.5;'>",
+          "<div style='font-size:13px; font-weight:700; color:#1e2d40;",
+                      "border-bottom:1px solid #ddd; padding-bottom:4px;",
+                      "margin-bottom:6px;'>",
+            cname,
+          "</div>",
+          "<div style='color:#555;'>",
+            "<b>Population:</b> ",    pop_fmt,  "<br/>",
+            "<b>Median Income:</b> ", inc_fmt,  "<br/>",
+            "<b>Median Rent:</b> ",   rent_fmt, "<br/>",
+          "</div>",
+          "<div style='margin-top:6px; padding-top:5px;",
+                      "border-top:1px solid #ddd; color:#1e2d40;'>",
+            "<b>", mlabel, ":</b> ",
+            "<span style='color:#c0392b; font-weight:700;'>", val_fmt, "</span>",
+          "</div>",
+        "</div>"
+      ))
+    })
+
+    leafletProxy("map", session) |>
+      clearShapes() |>
+      clearControls() |>
+      addPolygons(
+        data         = df,
+        fillColor    = ~pal(value),
+        fillOpacity  = 0.72,
+        color        = "white",
+        weight       = 1,
+        highlight    = highlightOptions(
+          weight       = 2.5,
+          color        = "#1e2d40",
+          fillOpacity  = 0.9,
+          bringToFront = TRUE
+        ),
+        label        = labels,
+        labelOptions = labelOptions(
+          style     = list(
+            "background-color" = "white",
+            "border"           = "1px solid #ccc",
+            "border-radius"    = "6px",
+            "padding"          = "8px",
+            "box-shadow"       = "2px 2px 6px rgba(0,0,0,0.15)"
+          ),
+          textsize  = "12px",
+          direction = "auto",
+          opacity   = 1
+        ),
+        layerId = ~county_name
+      ) |>
+      addLegend(
+        pal      = leg_pal,
+        values   = leg_vals,
+        title    = leg_title,
+        position = "bottomright",
+        opacity  = 0.85
+      )
+  })
+}
+
+shinyApp(ui, server)
+```
+
+## Research Question 1: What factors best predict county-level housing affordability burden in New York State from 2009–2024?
+
+To identify the key drivers of housing burden, four models are trained and compared: Linear Regression, Elastic Net, Random Forest, and XGBoost. The target variable is the rent-to-income housing burden ratio. Predictors include median home value, population, all five FMR bedroom sizes, macroeconomic indicators, and county fixed effects encoded as dummy variables. An 80/20 stratified train-test split and five-fold cross-validation are used to tune hyperparameters and evaluate performance.
+
+#### Model Comparison and Performance Plot
+
+The cross-validated results table and bar chart compare all four models on RMSE, MAE, and R². The Random Forest achieves the best overall performance with RMSE = 0.00705 and R² = 0.964, followed closely by Elastic Net and Linear Regression (both R² ≈ 0.960). XGBoost performs slightly worse (R² = 0.947) despite its greater complexity, suggesting the data structure does not benefit from deep boosting iterations. Importantly, all four models cluster within a narrow RMSE range of 0.007–0.008, which means the strength of the predictive signal is consistent and not dependent on model choice. This is a strong indicator that the features — particularly population, home value, and FMR — carry genuine, stable information about affordability burden rather than noise.
+
+#### Test Set Evaluation and Feature Importance
+
+The winning Random Forest model is evaluated on the held-out test set, confirming RMSE = 0.00638 and R² = 0.959 — both consistent with cross-validation, indicating no overfitting. The variable importance plot reveals a clear hierarchy of predictors. Population is the single strongest driver, reflecting the well-documented relationship between housing demand density and rent-to-income stress. County fixed effects rank second, capturing persistent local market character that numeric variables alone cannot explain. Median home value ranks third — counties where purchasing is already expensive tend to have proportionally higher rents as well. The FMR bedroom-size series and CPI follow, while mortgage rate and the Fed Funds Rate rank near the bottom. This pattern is significant: it suggests that affordability burden is primarily structural and geographic, not cyclical — a finding that has direct implications for what kinds of policy interventions are most likely to be effective.
+
+#### Correlation Table and Conclusion
+
+The correlation matrix provides a quantitative summary of variable relationships and validates the feature importance findings. Housing burden correlates most strongly with population (r = 0.73) and median home value (r = 0.60), confirming these as the primary structural drivers. In contrast, mortgage rate (r = −0.04) and the Fed Funds Rate (r = −0.04) show near-zero correlation with housing burden, reinforcing that macroeconomic rate variables play a limited direct role at the county level. The FMR columns are highly intercorrelated with each other (r = 0.96–1.00), indicating multicollinearity across bedroom sizes — the Random Forest handles this naturally, but it would require regularization in a linear setting. The year variable correlates strongly with CPI (r = 0.94) and the Fed Funds Rate (r = 0.73), confirming that both variables largely reflect long-run time trends rather than independent signals.
+
+```{r}
+############################################################
+# RQ1: What factors best predict county-level housing
+# affordability burden in New York State (2009–2024)?
+############################################################
+
+library(tidyverse)
+library(tidymodels)
+library(vip)
+library(scales)
+library(patchwork)
+
+set.seed(607)
+
+############################################################
+# 1. MODELING DATASET
+############################################################
+
+ml_refined <- final_master %>%
+  drop_na(
+    housing_burden,
+    median_home,
+    pop,
+    fmr_0, fmr_1, fmr_2, fmr_3, fmr_4,
+    mortgage_rate, fed_rate,
+    cpi, inflation_rate
+  ) %>%
+  filter(year >= 2010) %>%
+  mutate(
+    county_name = as.factor(county_name)
+  ) %>%
+  select(
+    county_name,
+    year,
+    housing_burden,
+    median_home,
+    pop,
+    fmr_0, fmr_1, fmr_2, fmr_3, fmr_4,
+    mortgage_rate,
+    fed_rate,
+    cpi,
+    inflation_rate
+  )
+
+############################################################
+# 2. TRAIN / TEST SPLIT
+############################################################
+
+split_obj <- initial_split(
+  ml_refined,
+  prop = 0.80,
+  strata = housing_burden
+)
+
+train_data <- training(split_obj)
+test_data  <- testing(split_obj)
+
+############################################################
+# 3. CROSS VALIDATION
+############################################################
+
+cv_folds <- vfold_cv(
+  train_data,
+  v = 5,
+  strata = housing_burden
+)
+
+############################################################
+# 4. PREPROCESSING
+############################################################
+
+rec <- recipe(housing_burden ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+############################################################
+# 5. MODELS
+############################################################
+
+lm_mod <- linear_reg() %>%
+  set_engine("lm")
+
+enet_mod <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet")
+
+rf_mod <- rand_forest(
+  trees = 500,
+  mtry = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("regression")
+
+xgb_mod <- boost_tree(
+  trees = 500,
+  tree_depth = tune(),
+  learn_rate = tune(),
+  min_n = tune(),
+  loss_reduction = tune()
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+############################################################
+# 6. WORKFLOWS
+############################################################
+
+wf_lm   <- workflow() %>% add_recipe(rec) %>% add_model(lm_mod)
+wf_enet <- workflow() %>% add_recipe(rec) %>% add_model(enet_mod)
+wf_rf   <- workflow() %>% add_recipe(rec) %>% add_model(rf_mod)
+wf_xgb  <- workflow() %>% add_recipe(rec) %>% add_model(xgb_mod)
+
+############################################################
+# 7. FIT MODELS
+############################################################
+
+metric_used <- metric_set(rmse, rsq, mae)
+
+res_lm <- fit_resamples(
+  wf_lm,
+  resamples = cv_folds,
+  metrics = metric_used
+)
+
+res_enet <- tune_grid(
+  wf_enet,
+  resamples = cv_folds,
+  grid = 10,
+  metrics = metric_used
+)
+
+res_rf <- tune_grid(
+  wf_rf,
+  resamples = cv_folds,
+  grid = 10,
+  metrics = metric_used
+)
+
+res_xgb <- tune_grid(
+  wf_xgb,
+  resamples = cv_folds,
+  grid = 10,
+  metrics = metric_used
+)
+
+############################################################
+# 8. BEST MODELS
+############################################################
+
+best_enet <- select_best(res_enet, metric = "rmse")
+best_rf   <- select_best(res_rf, metric = "rmse")
+best_xgb  <- select_best(res_xgb, metric = "rmse")
+
+############################################################
+# 9. MODEL COMPARISON
+############################################################
+
+results_tbl <- bind_rows(
+
+  collect_metrics(res_lm) %>%
+    mutate(model = "Linear Regression"),
+
+  collect_metrics(res_enet) %>%
+    filter(.config == best_enet$.config) %>%
+    mutate(model = "Elastic Net"),
+
+  collect_metrics(res_rf) %>%
+    filter(.config == best_rf$.config) %>%
+    mutate(model = "Random Forest"),
+
+  collect_metrics(res_xgb) %>%
+    filter(.config == best_xgb$.config) %>%
+    mutate(model = "XGBoost")
+
+) %>%
+  filter(.metric %in% c("rmse","rsq","mae")) %>%
+  select(model, .metric, mean) %>%
+  pivot_wider(names_from = .metric, values_from = mean) %>%
+  distinct() %>%
+  arrange(rmse)
+
+results_tbl
+
+############################################################
+# 10. PERFORMANCE PLOT
+############################################################
+
+plot_tbl <- results_tbl %>%
+  mutate(model = fct_reorder(model, rmse))
+
+ggplot(plot_tbl,
+       aes(x = model, y = rmse, fill = model)) +
+  geom_col(width = .72, alpha = .92) +
+  geom_text(aes(label = round(rmse, 4)),
+            vjust = -0.5,
+            size = 4.2,
+            fontface = "bold") +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, .12))
+  ) +
+  labs(
+    title = "Model Performance Comparison",
+    subtitle = "Lower RMSE indicates stronger predictive accuracy",
+    x = NULL,
+    y = "RMSE"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.text.x = element_text(face = "bold")
+  )
+
+############################################################
+# 11. TEST SET PERFORMANCE
+############################################################
+
+best_model_name <- results_tbl$model[1]
+
+final_wf <-
+  if(best_model_name == "Linear Regression") wf_lm else
+  if(best_model_name == "Elastic Net") finalize_workflow(wf_enet, best_enet) else
+  if(best_model_name == "Random Forest") finalize_workflow(wf_rf, best_rf) else
+    finalize_workflow(wf_xgb, best_xgb)
+
+final_fit <- last_fit(final_wf, split_obj)
+
+collect_metrics(final_fit)
+
+############################################################
+# 12. FEATURE IMPORTANCE
+############################################################
+
+fit_obj <- extract_workflow(final_fit) %>%
+  fit(train_data)
+
+vip(fit_obj, num_features = 12) +
+  labs(
+    title = paste("Top Predictors -", best_model_name),
+    subtitle = "Most influential factors associated with housing burden"
+  ) +
+  theme_minimal(base_size = 13)
+
+############################################################
+# 13. CORRELATION TABLE
+############################################################
+
+ml_refined %>%
+  select(-county_name) %>%
+  cor(use = "pairwise.complete.obs") %>%
+  round(2)
+
+############################################################
+# 14. RESEARCH QUESTION OUTPUT
+############################################################
+
+cat("
+RQ1:
+
+What factors best predict county-level housing affordability
+burden in New York State from 2009 to 2024?
+
+Based on the strongest-performing model, the most important
+predictors include:
+
+1. Population size
+2. County-specific location effects
+3. Median home values
+4. Fair Market Rent levels
+5. Inflation conditions
+6. Long-term time trends
+
+These findings suggest that affordability burden is largely
+driven by housing market conditions, regional demand pressures,
+and geographic differences across counties.
+")
+```
+
+## Research Question 2: How sensitive are county-level HUD Fair Market Rent (2-BR) predictions to the removal of high-interest-rate years?
+
+Research Question 2 tests how sensitive Fair Market Rent predictions are to the removal of high-rate years (2022–2024), when the 30-year mortgage rate exceeded 5%. Both Linear Regression and Random Forest are retrained at five forgetting levels (case weight 1.0 down to 0.0 for high-rate-year observations).
+
+#### R² forgetting curve
+
+Both models maintain high R² across all forgetting steps, declining only marginally from \~0.947 to \~0.940 at full unlearning. This stability confirms that FMR is structurally driven — a model with no knowledge of the 2022–2024 rate environment can still explain 94% of the cross-county variation in rents.
+
+#### Predicted FMR trajectory
+
+Prior to 2022, the full and unlearned models predict nearly identical statewide rent levels. After 2022, a visible gap opens, with the full model predicting approximately \$70/month higher rents on average. This gap — the shaded region in the chart — represents the direct imprint of the rate-hike era on model predictions.
+
+#### County-level sensitivity
+
+Geographic variation in the shift is striking. Downstate counties show the largest negative shifts: Rockland (−\$533), New York County (−\$519), the Bronx (−\$518), Queens (−\$474), and Kings (−\$469) — meaning rate-hike-era data caused the model to learn significantly higher rents in these markets. Conversely, upstate counties like Erie (+\$313), Onondaga (+\$271), and Monroe (+\$253) show positive shifts, suggesting rate hikes suppressed rents in those markets relative to their structural trend. Rural counties cluster near zero, indicating minimal sensitivity to the rate environment.
+
+#### Shift distribution by era
+
+The boxplot confirms that prediction shifts are concentrated in the high-rate era observations, with a wider and off-center distribution compared to the normal-rate era. The spread across county-year pairs in the high-rate era reflects the geographic heterogeneity documented in Figure 3 — some markets were strongly shaped by the rate environment while others were largely unaffected. Together, the four figures show that machine unlearning is a useful diagnostic tool for identifying which housing markets are most exposed to rate-cycle distortions in model training data.
+
+```{r}
+############################################################
+# RQ2: HOW SENSITIVE ARE COUNTY-LEVEL HUD FAIR MARKET RENT (2-BR)
+# PREDICTIONS TO THE REMOVAL OF HIGH-INTEREST-RATE YEARS?
+#
+# Target    : fmr_2 (2-BR Fair Market Rent — annual HUD data)
+# Forget    : years where mortgage rate > 5% (2022–2024)
+# Models    : Linear Regression + Random Forest
+############################################################
+
+library(tidyverse)
+library(tidymodels)
+library(scales)
+library(patchwork)
+
+set.seed(607)
+
+############################################################
+# 1. DEFINE HIGH-RATE YEARS & SUMMARISE
+############################################################
+
+high_rate_years <- 2022:2024
+
+rate_summary <- final_master %>%
+  group_by(year) %>%
+  summarise(avg_rate = mean(mortgage_rate, na.rm = TRUE),
+            .groups = "drop") %>%
+  filter(!is.na(avg_rate))
+
+cat("=== MORTGAGE RATE CONTEXT ===\n")
+cat("Normal-rate era (2010–2021) avg:",
+    round(mean(rate_summary$avg_rate[rate_summary$year < 2022],
+               na.rm = TRUE), 2), "%\n")
+cat("High-rate era   (2022–2024) avg:",
+    round(mean(rate_summary$avg_rate[rate_summary$year >= 2022],
+               na.rm = TRUE), 2), "%\n\n")
+
+############################################################
+# 2. MODELING DATASET
+############################################################
+
+ml_fmr <- final_master %>%
+  drop_na(fmr_2, median_income, pop,
+          mortgage_rate, fed_rate,
+          cpi, inflation_rate) %>%
+  filter(year >= 2010,
+         fmr_2        > 0,
+         median_income > 0) %>%
+  mutate(county_name = as.factor(county_name)) %>%
+  select(
+    county_name,    # geographic fixed effects
+    year,           # time trend
+    fmr_2,          # TARGET: 2-BR Fair Market Rent
+    median_income,  # demand driver
+    pop,            # market size
+    mortgage_rate,  # key forgotten variable
+    fed_rate,       # monetary policy
+    cpi,            # price level
+    inflation_rate  # year-over-year inflation
+  )
+
+cat("=== DATASET OVERVIEW ===\n")
+cat("Rows          :", nrow(ml_fmr), "\n")
+cat("Unique counties:", n_distinct(ml_fmr$county_name), "\n")
+cat("Years covered :", min(ml_fmr$year), "–", max(ml_fmr$year), "\n\n")
+
+############################################################
+# 3. TRAIN / TEST SPLIT
+############################################################
+
+split_obj  <- initial_split(ml_fmr, prop = 0.80, strata = fmr_2)
+train_data <- training(split_obj)
+test_data  <- testing(split_obj)
+cv_folds   <- vfold_cv(train_data, v = 5, strata = fmr_2)
+
+############################################################
+# 4. RECIPES & MODELS
+############################################################
+
+base_rec <- recipe(fmr_2 ~ ., data = train_data) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+
+lm_mod <- linear_reg() %>%
+  set_engine("lm")
+
+rf_mod <- rand_forest(
+  trees = 500,
+  mtry  = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("regression")
+
+wf_lm <- workflow() %>% add_recipe(base_rec) %>% add_model(lm_mod)
+wf_rf <- workflow() %>% add_recipe(base_rec) %>% add_model(rf_mod)
+
+############################################################
+# 5. TUNE & BASELINE COMPARISON
+############################################################
+
+metric_set_used <- metric_set(rmse, rsq, mae)
+
+res_lm <- fit_resamples(wf_lm,
+                        resamples = cv_folds,
+                        metrics   = metric_set_used)
+
+res_rf <- tune_grid(wf_rf,
+                    resamples = cv_folds,
+                    grid      = 10,
+                    metrics   = metric_set_used)
+
+best_rf       <- select_best(res_rf, metric = "rmse")
+rf_spec_tuned <- finalize_workflow(wf_rf, best_rf) %>%
+  extract_spec_parsnip()
+
+cat("=== BASELINE MODEL COMPARISON (CV R²) ===\n")
+bind_rows(
+  collect_metrics(res_lm) %>%
+    filter(.metric == "rsq") %>%
+    mutate(model = "Linear Regression"),
+  collect_metrics(res_rf) %>%
+    filter(.config == best_rf$.config, .metric == "rsq") %>%
+    mutate(model = "Random Forest")
+) %>%
+  select(model, mean) %>%
+  rename(`CV R²` = mean) %>%
+  print()
+cat("\n")
+
+############################################################
+# 6. UNLEARNING SETUP
+############################################################
+
+forget_steps <- c(1.00, 0.75, 0.50, 0.25, 0.00)
+step_labels  <- c("Full (w=1.00)", "w=0.75", "w=0.50",
+                  "w=0.25", "Unlearned (w=0.00)")
+
+############################################################
+# 7. UNLEARNING LOOP — TEST SET (R² evaluation only)
+############################################################
+
+lm_metrics_list <- list()
+rf_metrics_list <- list()
+
+for (i in seq_along(forget_steps)) {
+
+  w     <- forget_steps[i]
+  label <- step_labels[i]
+  cat(">>> Fitting:", label, "\n")
+
+  train_w <- train_data %>%
+    mutate(
+      case_wt = importance_weights(
+        if_else(year %in% high_rate_years, w, 1.0)
+      )
+    )
+
+  rec_w <- recipe(fmr_2 ~ ., data = train_w) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_numeric_predictors())
+
+  # Linear Regression
+  fit_lm_w <- workflow() %>%
+    add_recipe(rec_w) %>%
+    add_model(lm_mod) %>%
+    add_case_weights(case_wt) %>%
+    fit(data = train_w)
+
+  lm_metrics_list[[i]] <- predict(fit_lm_w, new_data = test_data) %>%
+    bind_cols(test_data %>% select(fmr_2)) %>%
+    metrics(truth = fmr_2, estimate = .pred) %>%
+    mutate(forget_weight = w, step_label = label,
+           model = "Linear Regression")
+
+  # Random Forest
+  fit_rf_w <- workflow() %>%
+    add_recipe(rec_w) %>%
+    add_model(rf_spec_tuned) %>%
+    add_case_weights(case_wt) %>%
+    fit(data = train_w)
+
+  rf_metrics_list[[i]] <- predict(fit_rf_w, new_data = test_data) %>%
+    bind_cols(test_data %>% select(fmr_2)) %>%
+    metrics(truth = fmr_2, estimate = .pred) %>%
+    mutate(forget_weight = w, step_label = label,
+           model = "Random Forest")
+}
+
+all_metrics <- bind_rows(
+  bind_rows(lm_metrics_list),
+  bind_rows(rf_metrics_list)
+)
+
+############################################################
+# 8. FULL-DATASET PREDICTIONS — ALL 62 COUNTIES
+############################################################
+
+make_full_preds <- function(w, label) {
+
+  train_w <- train_data %>%
+    mutate(
+      case_wt = importance_weights(
+        if_else(year %in% high_rate_years, w, 1.0)
+      )
+    )
+
+  rec_w <- recipe(fmr_2 ~ ., data = train_w) %>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_zv(all_predictors()) %>%
+    step_normalize(all_numeric_predictors())
+
+  fit_w <- workflow() %>%
+    add_recipe(rec_w) %>%
+    add_model(rf_spec_tuned) %>%
+    add_case_weights(case_wt) %>%
+    fit(data = train_w)
+
+  predict(fit_w, new_data = ml_fmr) %>%
+    bind_cols(ml_fmr %>% select(county_name, year, fmr_2)) %>%
+    mutate(
+      forget_weight = w,
+      step_label    = factor(label, levels = step_labels),
+      high_rate_era = year %in% high_rate_years
+    )
+}
+
+cat("\n>>> Predicting on all 62 counties...\n")
+full_preds     <- make_full_preds(1.00, step_labels[1])
+unlearn_preds  <- make_full_preds(0.00, step_labels[5])
+all_steps_full <- map2_dfr(forget_steps, step_labels, make_full_preds)
+
+############################################################
+# 9. SENSITIVITY CALCULATION — ALL 62 COUNTIES
+############################################################
+
+sensitivity_df <- full_preds %>%
+  select(county_name, year, high_rate_era,
+         actual    = fmr_2,
+         full_pred = .pred) %>%
+  left_join(
+    unlearn_preds %>% select(county_name, year,
+                             unlearned_pred = .pred),
+    by = c("county_name", "year")
+  ) %>%
+  mutate(
+    pred_shift = unlearned_pred - full_pred,
+    era_label  = if_else(high_rate_era,
+                         "High-Rate Era (2022–24)",
+                         "Normal-Rate Era (2010–21)")
+  )
+
+county_sensitivity <- sensitivity_df %>%
+  filter(high_rate_era == TRUE) %>%
+  group_by(county_name) %>%
+  summarise(
+    mean_shift     = mean(pred_shift,      na.rm = TRUE),
+    mean_actual    = mean(actual,          na.rm = TRUE),
+    mean_full      = mean(full_pred,       na.rm = TRUE),
+    mean_unlearned = mean(unlearned_pred,  na.rm = TRUE),
+    pct_shift      = mean_shift / mean_full * 100,
+    .groups        = "drop"
+  ) %>%
+  mutate(
+    county_label = str_remove(county_name, " County"),
+    direction    = if_else(mean_shift >= 0,
+                           "Predicts Higher Without Rate-Hike Data",
+                           "Predicts Lower Without Rate-Hike Data")
+  ) %>%
+  arrange(desc(mean_shift))
+
+cat("Counties analysed:", nrow(county_sensitivity), "\n\n")
+
+############################################################
+# 10. VISUALIZATIONS
+############################################################
+
+# ── FIGURE 1: R² Both Models (More Space + No Grids) ──────────────────────────────
+rsq_tbl <- all_metrics %>%
+  filter(.metric == "rsq") %>%
+  mutate(forget_weight = as.numeric(forget_weight))
+
+p1 <- ggplot(rsq_tbl,
+             aes(x = forget_weight, y = .estimate,
+                 color = model, group = model)) +
+  geom_line(linewidth = 1.3) +
+  geom_point(size = 3.5) +
+
+  # Blue labels lower
+  geom_label(
+    data = rsq_tbl %>% filter(model == "Linear Regression"),
+    aes(label = round(.estimate, 3)),
+    nudge_y = -0.025,
+    nudge_x = 0.02,
+    size = 3.2,
+    label.size = 0.2,
+    show.legend = FALSE
+  ) +
+
+  # Orange labels higher
+  geom_label(
+    data = rsq_tbl %>% filter(model == "Random Forest"),
+    aes(label = round(.estimate, 3)),
+    nudge_y = 0.025,
+    nudge_x = -0.02,
+    size = 3.2,
+    label.size = 0.2,
+    show.legend = FALSE
+  ) +
+
+  scale_x_reverse(
+    breaks = forget_steps,
+    labels = c("Full\n(all years)", "75%", "50%",
+               "25%", "Forgotten\n(2022–24 removed)")
+  ) +
+
+  # more headroom on top
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 1.05),
+    expand = expansion(mult = c(0.02, 0.08))
+  ) +
+
+  scale_color_manual(values = c(
+    "Linear Regression" = "#0072B2",
+    "Random Forest"     = "#D55E00"
+  )) +
+
+  labs(
+    title    = "Figure 1 — Model Reliability as High-Rate Years Are Gradually Forgotten",
+    subtitle = paste(
+      "A flat R² line means FMR is structurally driven.",
+      "A sharp drop means the high-rate era was critical to model learning."
+    ),
+    x       = "← How much of the high-rate era (2022–24) the model remembers",
+    y       = "R² (variance explained)",
+    color   = NULL,
+    caption = paste(
+      "Note: R² evaluated on held-out test set at each forgetting step.",
+      "High-rate years = 2022–2024 when 30-yr mortgage rate exceeded 5%."
+    )
+  ) +
+
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position   = "bottom",
+    plot.title        = element_text(face = "bold", size = 13),
+    plot.subtitle     = element_text(color = "gray40", size = 10),
+    plot.caption      = element_text(color = "gray50", size = 9,
+                                     hjust = 0, face = "italic"),
+    axis.text         = element_text(size = 10),
+
+    # remove all grids
+    panel.grid.major  = element_blank(),
+    panel.grid.minor  = element_blank(),
+
+    # clean axis lines
+    axis.line         = element_line(color = "gray70")
+  )
+
+print(p1)
+
+# ── FIGURE 2: Trajectory — Full vs Unlearned ──────────────
+traj_df <- all_steps_full %>%
+  filter(forget_weight %in% c(1.00, 0.00)) %>%
+  group_by(year, forget_weight) %>%
+  summarise(mean_pred = mean(.pred, na.rm = TRUE),
+            .groups   = "drop")
+
+ribbon_df <- traj_df %>%
+  pivot_wider(names_from  = forget_weight,
+              values_from = mean_pred,
+              names_prefix = "w_") %>%
+  rename(full_line = w_1, unlearn_line = w_0) %>%
+  mutate(ymin = pmin(full_line, unlearn_line),
+         ymax = pmax(full_line, unlearn_line))
+
+lines_df <- traj_df %>%
+  mutate(series = if_else(
+    forget_weight == 1.00,
+    "Full Model (rate hike included)",
+    "Unlearned Model (rate hike removed)"
+  ))
+
+p2 <- ggplot() +
+  annotate("rect", xmin = 2021.5, xmax = 2024.5,
+           ymin = -Inf, ymax = Inf,
+           fill = "#C84B31", alpha = 0.07) +
+  annotate("text", x = 2022.1,
+           y = max(lines_df$mean_pred, na.rm = TRUE) * 0.88,
+           label = "High-Rate\nEra",
+           color = "#C84B31", size = 3.5,
+           fontface = "bold", hjust = 0) +
+  geom_ribbon(
+    data    = ribbon_df,
+    mapping = aes(x = year, ymin = ymin, ymax = ymax),
+    fill    = "#C84B31", alpha = 0.15
+  ) +
+  geom_line(
+    data    = lines_df,
+    mapping = aes(x = year, y = mean_pred,
+                  color = series, linetype = series),
+    linewidth = 1.4
+  ) +
+  geom_point(
+    data    = lines_df,
+    mapping = aes(x = year, y = mean_pred, color = series),
+    size    = 2.5
+  ) +
+  scale_color_manual(values = c(
+    "Full Model (rate hike included)"     = "#1F3C88",
+    "Unlearned Model (rate hike removed)" = "#2A9D8F"
+  )) +
+  scale_linetype_manual(values = c(
+    "Full Model (rate hike included)"     = "solid",
+    "Unlearned Model (rate hike removed)" = "dashed"
+  )) +
+  scale_x_continuous(breaks = seq(2010, 2024, 2)) +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(
+    title    = "Figure 2 — Predicted 2-BR FMR: Full vs. Rate-Hike Unlearned Model (All 62 Counties)",
+    subtitle = "Shaded gap = how much rate-hike years shift the model's FMR predictions statewide",
+    x        = NULL,
+    y        = "Mean Predicted 2-BR FMR ($/month)",
+    color    = NULL, linetype = NULL,
+    caption  = paste(
+      "Note: Lines show mean RF prediction across all 62 NY counties per year.",
+      "Wider shaded gap = greater sensitivity of FMR predictions to rate-hike era.",
+      "Dashed = what the model predicts having never seen 2022–2024 data."
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position  = "bottom",
+    legend.text      = element_text(size = 10),
+    plot.title       = element_text(face = "bold", size = 12),
+    plot.subtitle    = element_text(color = "gray40", size = 10),
+    plot.caption     = element_text(color = "gray50", size = 9,
+                                    hjust = 0, face = "italic"),
+    # remove all grids
+    panel.grid.major  = element_blank(),
+    panel.grid.minor  = element_blank(),
+    axis.text        = element_text(size = 10)
+  )
+
+print(p2)
+
+# ── FIGURE 3: ALL 62 COUNTIES — Prediction Shift ──────────
+county_plot_df <- county_sensitivity %>%
+  mutate(
+    county_label = fct_reorder(county_label, mean_shift),
+    bar_color    = if_else(mean_shift >= 0, "#C84B31", "#1B9E77")
+  )
+
+p3 <- ggplot(county_plot_df,
+             aes(x = mean_shift, y = county_label,
+                 fill = direction)) +
+  geom_col(alpha = 0.85, width = 0.75) +
+  geom_vline(xintercept = 0, color = "gray30",
+             linewidth = 0.7) +
+  geom_text(
+    aes(
+      label = dollar(mean_shift, accuracy = 1),
+      hjust = if_else(mean_shift >= 0, -0.1, 1.1)
+    ),
+    size = 2.8, fontface = "bold",
+    color = if_else(county_plot_df$mean_shift >= 0,
+                    "#C84B31", "#1B9E77")
+  ) +
+  scale_fill_manual(values = c(
+    "Predicts Higher Without Rate-Hike Data" = "#C84B31",
+    "Predicts Lower Without Rate-Hike Data"  = "#1B9E77"
+  )) +
+  scale_x_continuous(
+    labels = label_dollar(),
+    expand = expansion(mult = c(0.15, 0.15))
+  ) +
+  labs(
+    title    = "Figure 3 — FMR Prediction Shift After Rate-Hike Unlearning: All 62 NY Counties",
+    subtitle = paste(
+      "Each bar = how much the predicted 2-BR FMR changes when high-rate years (2022–24) are forgotten.",
+      "\nRed = model predicts higher FMR without rate-hike data (rate hikes suppressed predictions).",
+      "Green = model predicts lower FMR (rate hikes inflated predictions)."
+    ),
+    x       = "Mean Prediction Shift: Unlearned − Full Model ($/month)",
+    y       = NULL,
+    fill    = NULL,
+    caption = paste(
+      "Note: Counties sorted by prediction shift magnitude.",
+      "Larger absolute shift = county FMR was more sensitive to high-rate era training data.",
+      "Counties near zero had stable predictions regardless of rate environment."
+    )
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(
+    legend.position    = "bottom",
+    legend.text        = element_text(size = 9),
+    plot.title         = element_text(face = "bold", size = 12),
+    plot.subtitle      = element_text(color = "gray40", size = 9,
+                                      lineheight = 1.3),
+    plot.caption       = element_text(color = "gray50", size = 8,
+                                      hjust = 0, face = "italic"),
+# remove all grids
+    panel.grid.major  = element_blank(),
+    panel.grid.minor  = element_blank(),
+    axis.text.y        = element_text(size = 8)
+  )
+
+# Save tall enough for all 62 counties
+ggsave("rq2_fig3_all_counties.png",
+       plot = p3, width = 12, height = 14, dpi = 150)
+print(p3)
+
+# ── FIGURE 4: Distribution of Shift by Era ────────────────
+p4 <- ggplot(sensitivity_df,
+             aes(x = era_label, y = pred_shift,
+                 fill = era_label)) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             color = "gray50", linewidth = 0.8) +
+  geom_boxplot(width = 0.45, alpha = 0.85,
+               outlier.size = 1.5, outlier.alpha = 0.4) +
+  geom_jitter(width = 0.09, alpha = 0.18,
+              size = 1.1, color = "gray30") +
+  annotate("text", x = 2.35,
+           y = max(sensitivity_df$pred_shift, na.rm = TRUE) * 0.75,
+           label = "↑ Unlearned model predicts HIGHER FMR\n(rate hikes suppressed predictions)",
+           hjust = 0, size = 3.2, color = "gray35",
+           lineheight = 1.3) +
+  annotate("text", x = 2.35,
+           y = min(sensitivity_df$pred_shift, na.rm = TRUE) * 0.75,
+           label = "↓ Unlearned model predicts LOWER FMR\n(rate hikes inflated predictions)",
+           hjust = 0, size = 3.2, color = "gray35",
+           lineheight = 1.3) +
+  scale_fill_manual(values = c(
+    "High-Rate Era (2022–24)"   = "#0072B2",
+    "Normal-Rate Era (2010–21)" = "#D55E00"
+  )) +
+  scale_y_continuous(labels = label_dollar()) +
+  labs(
+    title    = "Figure 4 — Spread of FMR Prediction Shifts Across All Counties",
+    subtitle = paste(
+      "If the red box is further from zero than green,",
+      "rate-hike years meaningfully shaped how the model learned FMR."
+    ),
+    x       = NULL,
+    y       = "Prediction Shift: Unlearned − Full ($/month)",
+    fill    = NULL,
+    caption = paste(
+      "How to read: Box = middle 50% of county-year observations.",
+      "Line inside = median shift. Jittered dots = individual observations.",
+      "\nA shift concentrated in the high-rate era (blue) confirms",
+      "the model learned rate-specific patterns from 2022–2024."
+    )
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position    = "none",
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "gray40", size = 10,
+                                      lineheight = 1.3),
+    plot.caption       = element_text(color = "gray50", size = 9,
+                                      hjust = 0, face = "italic",
+                                      lineheight = 1.4),
+# remove all grids
+    panel.grid.major  = element_blank(),
+    panel.grid.minor  = element_blank(),
+    axis.text          = element_text(size = 11)
+  )
+
+print(p4)
+
+############################################################
+# 11. SUMMARY TABLE — ALL 62 COUNTIES
+############################################################
+
+cat("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+cat("  Table 1 — FMR Sensitivity: All 62 NY Counties\n")
+cat("  Sorted by absolute prediction shift (most sensitive first)\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+county_sensitivity %>%
+  arrange(desc(abs(mean_shift))) %>%
+  mutate(
+    `Actual FMR`      = dollar(mean_actual,    accuracy = 1),
+    `Full Model`      = dollar(mean_full,      accuracy = 1),
+    `Unlearned Model` = dollar(mean_unlearned, accuracy = 1),
+    `Shift ($)`       = dollar(mean_shift,     accuracy = 1),
+    `Shift (%)`       = paste0(round(pct_shift, 1), "%")
+  ) %>%
+  select(County          = county_label,
+         `Actual FMR`,
+         `Full Model`,
+         `Unlearned Model`,
+         `Shift ($)`,
+         `Shift (%)`) %>%
+  print(n = 62)
+
+cat("\n=== KEY STATS ===\n")
+cat("Mean shift across all counties :",
+    dollar(mean(county_sensitivity$mean_shift, na.rm = TRUE),
+           accuracy = 1), "/month\n")
+cat("Counties with positive shift    :",
+    sum(county_sensitivity$mean_shift > 0), "of 62\n")
+cat("Counties with shift > $50/month :",
+    sum(abs(county_sensitivity$mean_shift) > 50), "of 62\n")
+cat("Most sensitive county           :",
+    county_sensitivity$county_label[
+      which.max(abs(county_sensitivity$mean_shift))], "\n")
+cat("Least sensitive county          :",
+    county_sensitivity$county_label[
+      which.min(abs(county_sensitivity$mean_shift))], "\n")
+cat("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+############################################################
+# 12. RQ2 CONCLUSION
+############################################################
+
+cat("
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RQ2 CONCLUSION:
+
+How sensitive are county-level HUD FMR predictions to
+removal of high-interest-rate years (2022–2024)?
+
+Machine unlearning was applied via case weight reduction
+(1.00 → 0.00) on high-rate year observations across
+both Linear Regression and Random Forest models.
+
+Findings:
+
+1. STABLE MODELS: Both models maintain high R² even after
+   full unlearning — FMR is largely driven by structural
+   county factors (geography, income, population), not
+   exclusively by the interest rate environment.
+
+2. MODERATE SENSITIVITY: Mean prediction shift of",
+   dollar(mean(county_sensitivity$mean_shift,
+               na.rm = TRUE), accuracy = 1),
+   "/month —
+   modest but real influence of rate-hike years on what
+   the model learned about FMR levels.
+
+3. GEOGRAPHIC VARIATION: Sensitivity varies widely across
+   the 62 counties. Some markets are more structurally
+   anchored; others show stronger rate-cycle dependence.
+
+4. METHODOLOGICAL INSIGHT: Machine unlearning reveals
+   which counties' FMR benchmarks are most rate-sensitive,
+   informing policy around housing voucher adjustments
+   during rate cycle transitions.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+")
+```
+
+# Conclusion
+
+This analysis finds that housing affordability in New York State is primarily a structural and geographic problem. Local factors — population density, home price levels, and regional rent benchmarks — explain approximately 96% of the variation in housing burden across counties, and these relationships have remained stable even through the interest rate shock of 2022–2024. Macroeconomic variables such as mortgage rates and the Fed Funds Rate, while economically significant at the national level, contribute minimally to predicting county-level burden once local structural conditions are accounted for.
+
+The machine unlearning experiment adds an important nuance: while the high-rate era did influence what models learned about rental markets — producing a mean statewide prediction shift of −\$70/month — that influence was heavily concentrated in high-cost downstate counties. Rural and mid-size upstate markets were largely unaffected, reflecting their lower sensitivity to rate-driven demand swings. These findings suggest that meaningful affordability improvements in New York will require addressing local supply constraints and income gaps directly, rather than relying on monetary policy or cyclical rate relief to restore affordability.
+
+# References:
+
+-   OpenAI. (2026). *ChatGPT conversation on selective machine unlearning for counterfactual housing market simulation in New York State* \[Large language model\]. ChatGPT. <https://chat.openai.com/>
+
+-   *Claude*. (2026). *Claude conversation on* New York housing affordability analysis with multi-source data integration \[Large language model\]. *Claude*. <https://claude.ai/>[ ](https://claude.ai/new)
