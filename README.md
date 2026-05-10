@@ -1,8 +1,6 @@
-# DATA-607-Final-Project: NY Housing Affordability — Narratives with Expanded Visual Analysis
+# DATA-607-Final-Project: Housing Affordability Dynamics in New York State: A Multi-Source Analysis Using HUD, Census ACS, and FRED Economic Indicators
 
-================================================================================
-INTRODUCTION
-================================================================================
+## INTRODUCTION
 
 This project analyzes the housing affordability crisis in New York State by
 combining data from the U.S. Census Bureau, the Federal Reserve, and the
@@ -12,9 +10,7 @@ conditions have changed over time — and builds predictive models to identify w
 drives housing burden and how sensitive those models are to recent interest rate
 shocks.
 
-================================================================================
-ACS 5-Year Data Pull
-================================================================================
+## ACS 5-Year Data Pull
 
 Median household income, home values, and gross rent are pulled for all 62 New
 York counties from the Census ACS 5-Year Estimates API, covering 2009 to 2024.
@@ -24,9 +20,7 @@ highlights geographic disparity — Bronx County in 2009 had a median income of
 only $33,794, yet a median home value of $369,600, nearly double Albany County's
 $192,500 despite Albany having significantly higher income.
 
-================================================================================
-ACS Exploratory Data Analysis
-================================================================================
+## ACS Exploratory Data Analysis
 
 Two charts summarize statewide housing trends across the study period. The left
 panel plots median income, home values, and rent as separate trend lines. The most
@@ -46,9 +40,9 @@ rural counties and higher-burden urban counties has grown, not narrowed. The sha
 increase occurs after 2020, where the mean PTI climbs toward 4.5× — a level that
 signals severe structural unaffordability rather than a temporary cyclical dip.
 
-================================================================================
-FRED Data Pull
-================================================================================
+
+## FRED Data Pull
+
 
 Three macroeconomic series are retrieved from the FRED API: the 30-year fixed
 mortgage rate, the effective Federal Funds Rate, and the CPI. A retry-enabled
@@ -56,9 +50,9 @@ function handles intermittent server errors, attempting each request up to five
 times before failing. All three series are aligned to monthly frequency, joined
 together, and exported for use in the master dataset.
 
-================================================================================
-FRED ACS-Aligned Yearly Aggregate
-================================================================================
+
+## FRED ACS-Aligned Yearly Aggregate
+
 
 To align with the ACS panel, the monthly FRED data is aggregated into annual
 averages for 2009–2024. This produces a compact 16-row table with one row per
@@ -67,9 +61,9 @@ to join with the county-level data. The table confirms the historically low-rate
 environment of 2010–2021 (mortgage rate averaging around 3.5–5%) before the sharp
 rise to 6.28% in 2022–2024.
 
-================================================================================
-FRED Exploratory Data Analysis
-================================================================================
+
+## FRED Exploratory Data Analysis
+
 
 Two charts provide macroeconomic context for the housing analysis. The top panel
 plots the 30-year mortgage rate alongside the Federal Funds Rate from 1971 to the
@@ -89,9 +83,9 @@ the prior decade's baseline, and the rapid return toward target by 2023–2024
 provides important context for interpreting the rate environment during the machine
 unlearning experiment in RQ2.
 
-================================================================================
-HUD Fair Market Rent Data Pull
-================================================================================
+
+## HUD Fair Market Rent Data Pull
+
 
 HUD Fair Market Rent data for all five bedroom sizes — studio through four-bedroom
 — are downloaded for each New York county from fiscal years 2009 to 2024. Files
@@ -102,9 +96,9 @@ program. The preview confirms the expected structure — in 2009, Bronx County F
 already ranged from $1,091 (studio) to $1,817 (4-BR), substantially above most
 upstate counties.
 
-================================================================================
-HUD FMR Exploratory Data Analysis
-================================================================================
+
+## HUD FMR Exploratory Data Analysis
+
 
 A dot plot of 2024 HUD FMRs displays the full spread of rental costs across all
 62 counties by unit size, sorted from lowest to highest two-bedroom rent. The chart
@@ -121,9 +115,9 @@ spread in a rural county is under $300. This bedroom-size premium effect reflect
 tighter supply of family-sized units in dense urban areas, where larger apartments
 command a disproportionate market premium beyond the base rent level.
 
-================================================================================
-Master Dataset Build
-================================================================================
+
+## Master Dataset Build
+
 
 The three data sources are merged into a single county-year panel by joining ACS,
 HUD, and FRED data onto a complete 62-county × 16-year grid. Four derived features
@@ -133,9 +127,9 @@ and macro housing pressure (burden multiplied by mortgage rate). The final datas
 has 992 rows and 21 variables, providing a rich foundation for both exploratory
 analysis and predictive modeling.
 
-================================================================================
-Shiny App
-================================================================================
+
+## Shiny App
+
 
 An interactive Shiny application maps any variable in the master dataset across all
 62 New York counties for any year from 2009 to 2024. Users select a metric from a
@@ -145,9 +139,9 @@ The app makes it easy to observe, for example, how the housing burden ratio
 darkens across downstate counties after 2020, or how FMR increases spread
 geographically over time — patterns that are difficult to detect from tables alone.
 
-================================================================================
-RQ1: Model Setup and Training
-================================================================================
+
+## RQ1: Model Setup and Training
+
 
 To identify the key drivers of housing burden, four models are trained and compared:
 Linear Regression, Elastic Net, Random Forest, and XGBoost. The target variable is
@@ -156,9 +150,9 @@ population, all five FMR bedroom sizes, macroeconomic indicators, and county fix
 effects encoded as dummy variables. An 80/20 stratified train-test split and five-fold
 cross-validation are used to tune hyperparameters and evaluate performance.
 
-================================================================================
-RQ1: Model Comparison and Performance Plot
-================================================================================
+
+## RQ1: Model Comparison and Performance Plot
+
 
 The cross-validated results table and bar chart compare all four models on RMSE,
 MAE, and R². The Random Forest achieves the best overall performance with RMSE =
@@ -171,9 +165,9 @@ consistent and not dependent on model choice. This is a strong indicator that th
 features — particularly population, home value, and FMR — carry genuine, stable
 information about affordability burden rather than noise.
 
-================================================================================
-RQ1: Test Set Evaluation and Feature Importance
-================================================================================
+
+## RQ1: Test Set Evaluation and Feature Importance
+
 
 The winning Random Forest model is evaluated on the held-out test set, confirming
 RMSE = 0.00638 and R² = 0.959 — both consistent with cross-validation, indicating
@@ -188,9 +182,9 @@ bottom. This pattern is significant: it suggests that affordability burden is
 primarily structural and geographic, not cyclical — a finding that has direct
 implications for what kinds of policy interventions are most likely to be effective.
 
-================================================================================
-RQ1: Correlation Table and Conclusion
-================================================================================
+
+## RQ1: Correlation Table and Conclusion
+
 
 The correlation matrix provides a quantitative summary of variable relationships
 and validates the feature importance findings. Housing burden correlates most
@@ -205,9 +199,9 @@ setting. The year variable correlates strongly with CPI (r = 0.94) and the Fed
 Funds Rate (r = 0.73), confirming that both variables largely reflect long-run
 time trends rather than independent signals.
 
-================================================================================
-RQ2: Machine Unlearning Experiment
-================================================================================
+
+## RQ2: Machine Unlearning Experiment
+
 
 Research Question 2 tests how sensitive Fair Market Rent predictions are to the
 removal of high-rate years (2022–2024), when the 30-year mortgage rate exceeded 5%.
@@ -244,9 +238,9 @@ while others were largely unaffected. Together, the four figures show that machi
 unlearning is a useful diagnostic tool for identifying which housing markets are
 most exposed to rate-cycle distortions in model training data.
 
-================================================================================
-CONCLUSION
-================================================================================
+
+## CONCLUSION
+
 
 This analysis finds that housing affordability in New York State is primarily a
 structural and geographic problem. Local factors — population density, home price
