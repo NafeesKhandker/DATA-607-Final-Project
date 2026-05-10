@@ -1,4 +1,4 @@
-# DATA-607-Final-Project: Housing Affordability Dynamics in New York State: A Multi-Source Analysis Using HUD, Census ACS, and FRED Economic Indicators
+# DATA 607 Final Project- Housing Affordability Dynamics in New York State: A Multi-Source Analysis Using HUD, Census ACS, and FRED Economic Indicators
 
 ## INTRODUCTION
 
