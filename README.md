@@ -130,6 +130,7 @@ analysis and predictive modeling.
 
 ## Shiny App
 
+Link: https://khandker.shinyapps.io/shinyapp/
 
 An interactive Shiny application maps any variable in the master dataset across all
 62 New York counties for any year from 2009 to 2024. Users select a metric from a
