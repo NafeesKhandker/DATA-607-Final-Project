@@ -27,6 +27,28 @@ The study combines multiple heterogeneous datasets to construct a unified housin
 
 This multi-source integration enables a comprehensive view of housing affordability across both local and macroeconomic dimensions.
 
+## Package Installation
+
+```{r}
+# install.packages("tidyverse")
+# install.packages("httr")
+# install.packages("jsonlite")
+# install.packages("tidycensus")
+# install.packages("fredr")
+# install.packages("lubridate")
+# install.packages("zoo")
+# install.packages("gt")
+# install.packages("scales")
+# install.packages("patchwork")
+# install.packages("dplyr")
+# install.packages("shiny")
+# install.packages("leaflet")
+# install.packages("tigris")
+# install.packages("sf")
+# install.packages("tidymodels")
+# install.packages("vip")
+```
+
 ## ACS 5-Year Data Pull
 
 Median household income, home values, and gross rent are pulled for all 62 New York counties from the Census ACS 5-Year Estimates API, covering 2009 to 2024. County names are cleaned and all numeric fields are standardized before the data is stacked into a single panel and saved as a CSV.
